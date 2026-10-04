@@ -1,0 +1,203 @@
+name: Build
+
+on:
+  push:
+    branches: [ master, main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # 产物命名沿用上游惯例：cfst_<os>_<arch>.zip / .tar.gz，
+  # 压缩包内可执行文件名为 cfst（Windows 为 cfst.exe）
+  BINARY_BASE: cfst
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+          - os: windows-latest
+            goos: windows
+            goarch: '386'
+          - os: windows-latest
+            goos: windows
+            goarch: arm64
+
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: '386'
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm
+
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run tests
+        run: go test ./... -count=1
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VER="${GITHUB_REF_NAME}"
+          else
+            VER="${GITHUB_SHA::7}-dev"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "版本号: ${VER}"
+
+      # 版本号通过 -ldflags 写入 main.version，与上游手动编译方式一致
+      - name: Build
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          EXT=""
+          if [[ "${GOOS}" == "windows" ]]; then EXT=".exe"; fi
+          OUT="stage/${BINARY_BASE}${EXT}"
+          mkdir -p stage
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "${OUT}" .
+          ls -la stage/
+
+      # 把 ip.txt / ipv6.txt / script / README 一起打包，解压即可直接用
+      - name: Assemble package
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          EXT=""
+          if [[ "${GOOS}" == "windows" ]]; then EXT=".exe"; fi
+          cp ip.txt ipv6.txt README.md stage/
+          cp -r script stage/script
+          ls -la stage/
+
+      - name: Archive (zip)
+        if: matrix.goos != 'linux'
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          NAME="${BINARY_BASE}_${GOOS}_${GOARCH}"
+          cd stage && zip -r "../${NAME}.zip" . && cd ..
+          ls -la "${NAME}.zip"
+
+      - name: Archive (tar.gz)
+        if: matrix.goos == 'linux'
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          NAME="${BINARY_BASE}_${GOOS}_${GOARCH}"
+          tar -czf "${NAME}.tar.gz" -C stage .
+          ls -la "${NAME}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_BASE }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            ${{ env.BINARY_BASE }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
+            ${{ env.BINARY_BASE }}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List files
+        run: ls -la dist/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## CloudflareSpeedTest · 逐行端口支持
+
+            ### 本分支新增
+            - ✅ 数据文件支持 **CSV**，自动识别 `ip`、`port` 两列（列顺序、数量随意）
+            - ✅ **逐行端口**：每行可测不同端口，同一个 IP 的不同端口算两个独立目标
+            - ✅ 兼容原有 `ip.txt`（IP / IP 段）与 `IP:端口`、`[IPv6]:端口` 写法
+            - ✅ `result.csv` 新增「端口」列，第 1 列仍是纯 IP（不影响 3proxy/Hosts/DDNS 脚本）
+            - ✅ 下载测速改为多轮取样，速度按「总字节 / 总耗时」计算，结果更稳
+            - ✅ 修复本地端口泄漏（`SO_LINGER=0` + 主动回收空闲连接）
+
+            ### 各平台文件
+
+            系统 | 架构 | 文件
+            :---- | :---- | :----
+            **Windows** | x86_64 | `cfst_windows_amd64.zip`
+            **Windows** | x86 | `cfst_windows_386.zip`
+            **Windows** | ARM v8 | `cfst_windows_arm64.zip`
+            **Linux** | x86_64 | `cfst_linux_amd64.tar.gz`
+            **Linux** | x86 | `cfst_linux_386.tar.gz`
+            **Linux** | ARM v8 | `cfst_linux_arm64.tar.gz`
+            **Linux** | ARM v6/v7 | `cfst_linux_arm.tar.gz`
+            **macOS** | ARM (M 系列) | `cfst_darwin_arm64.zip`
+            **macOS** | Intel | `cfst_darwin_amd64.zip`
+
+            > 压缩包内已含 `ip.txt`、`ipv6.txt` 与 `script/` 脚本目录，解压即用。
+            > Linux / macOS 解压后需赋予执行权限：`chmod +x cfst`
+
+            ### 用法（CSV 逐行端口）
+
+            ```bash
+            # nodes.csv 里含 ip、port 两列即可，其余列会被忽略
+            ./cfst -f nodes.csv -dd -tl 200 -p 20
+            ```
+
+            > 详细说明见 README 的「**非标端口 / CSV 数据文件**」章节。
+
+            ****
+
+            基于 [XIU2/CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest)，MIT。
