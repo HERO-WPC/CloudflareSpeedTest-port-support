@@ -5,7 +5,6 @@ import (
 
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -26,18 +25,21 @@ var (
 )
 
 // pingReceived pingTotalTime
-func (p *Ping) httping(ip *net.IPAddr) (int, time.Duration, string) {
+func (p *Ping) httping(ip *utils.IPAddr) (int, time.Duration, string) {
+	tr := &http.Transport{
+		DialContext: getDialContext(ip),
+		//TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // 跳过证书验证
+	}
+	// 每个 IP 一个 Transport，用完必须回收：否则连接留在空闲池里等超时，
+	// 大量候选会占满本地临时端口，之后所有连接都建不起来。
+	defer tr.CloseIdleConnections()
 	hc := http.Client{
-		Timeout: time.Second * 2,
-		Transport: &http.Transport{
-			DialContext: getDialContext(ip),
-			//TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // 跳过证书验证
-		},
+		Timeout:   time.Second * 2,
+		Transport: tr,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse // 阻止重定向
 		},
 	}
-	defer hc.CloseIdleConnections()
 
 	// 先访问一次获得 HTTP 状态码 及 地区码
 	var colo string

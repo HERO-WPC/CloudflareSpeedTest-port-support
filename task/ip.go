@@ -1,7 +1,6 @@
 package task
 
 import (
-	"bufio"
 	"log"
 	"math/rand"
 	"net"
@@ -9,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/XIU2/CloudflareSpeedTest/utils"
 )
 
 const defaultInputFile = "ip.txt"
@@ -37,15 +38,16 @@ func randIPEndWith(num byte) byte {
 }
 
 type IPRanges struct {
-	ips     []*net.IPAddr
+	ips     []*utils.IPAddr
 	mask    string
 	firstIP net.IP
 	ipNet   *net.IPNet
+	port    int // 当前正在解析的这一行所指定的端口（0 表示未指定，使用 -tp）
 }
 
 func newIPRanges() *IPRanges {
 	return &IPRanges{
-		ips: make([]*net.IPAddr, 0),
+		ips: make([]*utils.IPAddr, 0),
 	}
 }
 
@@ -78,7 +80,7 @@ func (r *IPRanges) appendIPv4(d byte) {
 }
 
 func (r *IPRanges) appendIP(ip net.IP) {
-	r.ips = append(r.ips, &net.IPAddr{IP: ip})
+	r.ips = append(r.ips, &utils.IPAddr{IP: ip, Port: r.port})
 }
 
 // 返回第四段 ip 的最小值及可用数目
@@ -147,44 +149,54 @@ func (r *IPRanges) chooseIPv6() {
 	}
 }
 
-func loadIPRanges() []*net.IPAddr {
+// addEntry 把一个测速目标（IP + 可选端口）展开为待测速的 IP 列表。
+// 单个 IP 直接加入；IP 段则按 随机一个 / 全部(-allip) 展开，端口沿用该行指定的端口。
+func (r *IPRanges) addEntry(entry utils.IPAddr) {
+	r.port = entry.Port
+	// 用原始 CIDR 文本重新解析，以保留掩码信息
+	r.parseCIDR(entry.IP.String())
+	if isIPv4(entry.IP.String()) {
+		r.chooseIPv4()
+	} else {
+		r.chooseIPv6()
+	}
+}
+
+func loadIPRanges() []*utils.IPAddr {
 	ranges := newIPRanges()
+
 	if IPText != "" { // 从参数中获取 IP 段数据
-		IPs := strings.Split(IPText, ",") // 以逗号分隔为数组并循环遍历
-		for _, IP := range IPs {
+		// 支持 -ip 1.1.1.1,2.2.2.2/24,2606:4700::/32 以及带端口的 1.1.1.1:8443
+		for _, IP := range strings.Split(IPText, ",") {
 			IP = strings.TrimSpace(IP) // 去除首尾的空白字符（空格、制表符、换行符等）
 			if IP == "" {              // 跳过空的（即开头、结尾或连续多个 ,, 的情况）
 				continue
 			}
-			ranges.parseCIDR(IP) // 解析 IP 段，获得 IP、IP 范围、子网掩码
-			if isIPv4(IP) {      // 生成要测速的所有 IPv4 / IPv6 地址（单个/随机/全部）
-				ranges.chooseIPv4()
+			if ip, port, ok := parseIPField(IP); ok {
+				ranges.addEntry(utils.IPAddr{IP: ip, Port: port})
 			} else {
-				ranges.chooseIPv6()
+				log.Fatalln("[-ip] 参数中存在无法解析的 IP：", IP)
 			}
 		}
-	} else { // 从文件中获取 IP 段数据
-		if IPFile == "" {
-			IPFile = defaultInputFile
-		}
-		file, err := os.Open(IPFile)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() { // 循环遍历文件每一行
-			line := strings.TrimSpace(scanner.Text()) // 去除首尾的空白字符（空格、制表符、换行符等）
-			if line == "" {                           // 跳过空行
-				continue
-			}
-			ranges.parseCIDR(line) // 解析 IP 段，获得 IP、IP 范围、子网掩码
-			if isIPv4(line) {      // 生成要测速的所有 IPv4 / IPv6 地址（单个/随机/全部）
-				ranges.chooseIPv4()
-			} else {
-				ranges.chooseIPv6()
-			}
-		}
+		return ranges.ips
+	}
+
+	// 从文件中获取数据（兼容 ip.txt 单列 IP 段，以及含 ip/port 列的 CSV）
+	if IPFile == "" {
+		IPFile = defaultInputFile
+	}
+	content, err := os.ReadFile(IPFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 逐个测速目标展开（单个 IP 或 IP 段，端口随目标走）
+	for _, entry := range parseIPList(string(content)) {
+		ranges.addEntry(entry)
+	}
+
+	if len(ranges.ips) == 0 {
+		log.Fatalf("[%s] 中没有解析到任何可用的 IP，请检查文件格式（支持 ip.txt 单列 IP 段，或含 ip、port 列的 CSV）。\n", IPFile)
 	}
 	return ranges.ips
 }
