@@ -3,17 +3,25 @@ package task
 import (
 	"net"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/XIU2/CloudflareSpeedTest/utils"
 )
 
-// 统计本机 TIME_WAIT 连接数
+// 统计本机 TIME_WAIT 连接数。
+//
+// 只支持 Linux：这里靠解析 netstat 的输出来统计，而各系统的字段格式
+// 和连接状态字符串都不一样（macOS 的 netstat 不打印 TIME_WAIT，Windows 的
+// 输出格式也完全不同），所以在其它系统上直接跳过，避免误报。
 func timeWaitCount(t *testing.T) int {
+	if runtime.GOOS != "linux" {
+		t.Skipf("仅支持 Linux（当前 %s），跳过", runtime.GOOS)
+	}
 	out, err := exec.Command("netstat", "-an").Output()
 	if err != nil {
-		t.Skip("拿不到 netstat，跳过")
+		t.Skipf("拿不到 netstat，跳过: %v", err)
 	}
 	return strings.Count(string(out), "TIME_WAIT")
 }
@@ -23,6 +31,9 @@ func timeWaitCount(t *testing.T) int {
 // 之后所有连接报 "can't assign requested address"——包括机器上的其它业务。
 // 这里对本地监听端口做几百次探测，确认端口不会堆积。
 func TestTCPingDoesNotLeakPorts(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("仅支持 Linux（当前 %s），跳过", runtime.GOOS)
+	}
 	if _, err := exec.LookPath("netstat"); err != nil {
 		t.Skip("没有 netstat，跳过")
 	}

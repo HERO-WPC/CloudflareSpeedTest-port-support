@@ -17,8 +17,30 @@ env:
   BINARY_BASE: cfst
 
 jobs:
+  # 测试只跑一次（ubuntu），不放进 matrix：
+  # 一是测试与目标平台无关，跑 9 遍纯浪费；
+  # 二是移植来的端口回收测试依赖 netstat 输出格式，只适合 Linux。
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -count=1
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -63,9 +85,6 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Run tests
-        run: go test ./... -count=1
-
       - name: Determine version
         id: ver
         shell: bash
@@ -107,8 +126,25 @@ jobs:
           cp -r script stage/script
           ls -la stage/
 
-      - name: Archive (zip)
-        if: matrix.goos != 'linux'
+      # Windows runner 上没有 zip 命令，用 PowerShell 自带的 Compress-Archive。
+      # 用 Push-Location 进 stage 再压缩，否则条目会带 stage/ 前缀，
+      # 与 macOS/Linux 产物的结构不一致。
+      - name: Archive (zip, Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          $name = '{0}_{1}_{2}' -f $env:BINARY_BASE, $env:GOOS, $env:GOARCH
+          Push-Location stage
+          Compress-Archive -Path * -DestinationPath "../$name.zip" -Force
+          Pop-Location
+          Get-Item "$name.zip" | Select-Object Name, Length
+
+      # macOS 自带 zip
+      - name: Archive (zip, macOS)
+        if: matrix.goos == 'darwin'
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
