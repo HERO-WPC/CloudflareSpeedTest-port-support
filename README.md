@@ -462,6 +462,8 @@ cfst -ip "[2606:4700::1]:2053"
 > 关于端口占用：延迟测速（TCPing）每次探测都会新建连接，正常关闭会让本地端口进入 **60 秒 TIME_WAIT**；候选 IP 数量大时（几千个 × 每个测多次）会把本地临时端口池占满，导致后续所有连接报 `can't assign requested address`，甚至影响机器上其它程序。  
 > 本软件对探测连接设置 `SO_LINGER=0`（内核直接发 RST，端口立即可复用），HTTPing 与下载测速则在每个 IP 测完后**主动回收空闲连接**，避免端口堆积。
 
+> 上面「多轮下载取样」与「端口回收」两处实现参考了 [byJoey/yx-tools](https://github.com/byJoey/yx-tools)（同样是基于本项目的分支）。
+
 </details>
 
 ****
